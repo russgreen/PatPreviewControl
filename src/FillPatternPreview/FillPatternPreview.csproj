@@ -7,4 +7,7 @@
     <AssemblyName>FillPatternPreview</AssemblyName>
     <RootNamespace>FillPatternPreview</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="FillPatternPreview.Tests" />
+  </ItemGroup>
 </Project>
