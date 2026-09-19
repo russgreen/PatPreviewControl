@@ -10,7 +10,8 @@ public sealed record PatternDefinition(
     string Name,
     string? Description,
     bool IsModel,
-    IReadOnlyList<LineGroup> LineGroups);
+    IReadOnlyList<LineGroup> LineGroups,
+    string? Units = null);
 
 /// <summary>
 /// Represents a group of parallel hatch lines.

@@ -12,9 +12,10 @@ This document describes the **v1 implementation as it actually exists in this re
 - A WPF `Control` (`FillPatternPreview`) that binds to raw text or a file path and renders the selected pattern (§5).
 - Immediate-mode rendering: on every `OnRender`, each line family in the pattern is expanded directly into `DrawingContext` calls across the visible viewport — no caching, no `DrawingBrush` tiling (§7).
 - Solid and dashed line families, including the shift/offset semantics that produce staggered (e.g. running-bond brick) coursing (§7).
+- Units-aware default scale: `%UNITS=` is parsed and, for drafting patterns, automatically converted to a print-true device-pixel scale (§9) — no per-pattern manual `Scale` calculation needed.
 - An experimental, opt-in alternate rendering path (`UsePatternMaker`) that is **not** a faithful interpreter of arbitrary `.pat` content — see §8.
 
-**Out of scope for v1** — see §13 for the full list; headline items: geometry/tile caching, Revit `FillPattern` reflection adapter, mouse/keyboard interaction (zoom/pan), accessibility automation peer, a wired-up `Diagnostics` property/event, unit-aware default scaling.
+**Out of scope for v1** — see §13 for the full list; headline items: geometry/tile caching, Revit `FillPattern` reflection adapter, mouse/keyboard interaction (zoom/pan), accessibility automation peer, a wired-up `Diagnostics` property/event.
 
 ## 4. Core Concepts
 - **PatternDefinition**: name, optional description, `IsModel` flag, list of `LineGroup`s.
@@ -26,11 +27,12 @@ This document describes the **v1 implementation as it actually exists in this re
     - `DeltaY` ("offset") is measured **perpendicular** to the line's direction. It is the spacing between successive parallel copies.
     - To get the world-space step vector: `worldDelta = DeltaX * direction + DeltaY * normal`, where `direction = (cos(angle), sin(angle))` and `normal = (-direction.Y, direction.X)`.
   - `DashPattern` — an ordered list of values repeating periodically along each line, starting at that line's own origin (not wherever the line happens to enter the visible viewport): positive = drawn segment length, negative = gap length, zero = dot (rendered as a small square sized to the stroke thickness). An empty list means a solid, undashed line.
+- **Units**: `PatternDefinition.Units` holds the raw `%UNITS=` value (e.g. `"INCH"`, `"MM"`), uppercased, or `null` if never declared. See §9 for how it affects default scale.
 - **Tile domain**: not computed in v1. The control does not derive a minimal repeating rectangle; it directly enumerates and clips line copies against the current viewport every render pass (§7).
 
 ## 5. Data Model
 ```csharp
-sealed record PatternDefinition(string Name, string? Description, bool IsModel, IReadOnlyList<LineGroup> LineGroups);
+sealed record PatternDefinition(string Name, string? Description, bool IsModel, IReadOnlyList<LineGroup> LineGroups, string? Units = null);
 sealed record LineGroup(double AngleDeg, double OriginX, double OriginY, double DeltaX, double DeltaY, IReadOnlyList<double> DashPattern);
 ```
 `PatternDiagnostics` (Success, LineGroupCount, WarningCount, ErrorCount, TileSize, Tileable, ParseDuration, Message) exists as a record in `Model/PatternDefinition.cs` but is **not currently populated or exposed** by the control or parser. It is reserved for the v2 diagnostics work in §13.
@@ -57,7 +59,7 @@ Not implemented: `PatternSource` enum, `RevitFillPattern`, `StrokeThicknessOverr
 
 ### File Structure
 - **Comments**: a line whose first non-whitespace character is `;` is a full-line comment. An inline `;` on a data or header line truncates the rest of that line as a trailing comment.
-- **Units** (`;%UNITS=...`): recognized only as an ordinary comment line — it is **not** parsed, stored on `PatternDefinition`, or used to influence default scale. A pattern authored in `MM` and one authored in fractional inches are treated identically by the parser; matching their visual scale is the caller's responsibility via the `Scale` property.
+- **Units** (`;%UNITS=...`): parsed and stored on `PatternDefinition.Units` (uppercased). Conventionally a file-level declaration appearing before the first pattern header, applying to every pattern that follows; the parser tracks the most recently seen value and also honors it if repeated per-pattern (after a `*Name` header, mirroring `%TYPE`). See §9 for how this drives default scale.
 - **Header**: `*name[, description]` starts a new pattern. Any preceding open pattern is committed first (see Duplicate names below).
 - **Type declaration** (`%TYPE=MODEL` / `%TYPE=DRAFTING`): recognized both as a trailing comment on the header line itself (`*Name ;%TYPE=MODEL`) and — the far more common real-world form, matching `Constants.PAT_FILE_TEMPLATE`'s own output — as its own standalone comment line immediately following the header. An unrecognized `%TYPE=` value is recorded as a warning and does not change `IsModel`. Absent any `%TYPE=` tag, `IsModel` defaults to `false` (drafting).
 - **Definition lines**: comma-separated tokens, `AngleDeg, OriginX, OriginY, DeltaX, DeltaY[, dash1, dash2, ...]`. At least 5 numeric tokens are required; the dash list may be empty (solid line) or arbitrarily long (not limited to exactly one dash + one gap). All tokens are parsed with `double.TryParse` using `NumberStyles.Float | NumberStyles.AllowThousands` and `CultureInfo.InvariantCulture`. A line with fewer than 5 tokens, or any unparsable token, is recorded as an error and skipped — it does not abort the rest of the file.
@@ -75,7 +77,7 @@ For each `LineGroup`, every render pass:
 3. Spacing between copies = `|delta · normal|`, with fallbacks (`delta.Length`, then a fixed `8*scale`) for degenerate zero-spacing input.
 4. Determine the range of repeat indices `k` needed to cover the visible control rect (projected onto `normal`), capped at 4000 repeats per family as a performance guard (families requiring more are skipped entirely rather than truncated). This range must be derived from the *signed* step `delta · normal` (how much the projection actually changes per unit `k`), not from its absolute value (the spacing magnitude) — the two have different signs whenever a family's angle/offset combination makes a positive `k` step decrease the projection. Using the absolute value here silently clamps the usable range to only 2-3 repeats in that case (a positive-only band near `k=0`), rendering just the first few copies of the family and none beyond, until fixed.
 5. For each `k`, compute `basePoint = origin + k*delta` (the true origin of that copy) and intersect the infinite line through `basePoint` in `direction` with the control's rect to get a visible chord `(p1, p2)`. This intersection is ordered so that `p2` is always further along `+direction` than `p1` — i.e. walking from `p1` by `direction*t` for increasing `t` moves toward `p2`, never away from it. (This ordering is *required* for correct dashing — a solid line looks the same either way, but a dashed line walked backwards is pushed entirely outside the render clip and disappears. This exact bug affected every family whose direction pointed "backwards" relative to a naive left→right/top→bottom intersection order, e.g. 180° and -90° families, until fixed.)
-6. Expand the dash pattern along `(p1, p2)`, with its phase anchored to `basePoint` (not to `p1`) so that copies shifted by the "shift" component of `delta` show the correct staggered phase relative to each other.
+6. Expand the dash pattern along `(p1, p2)`, with its phase anchored to `basePoint` (not to `p1`) so that copies shifted by the "shift" component of `delta` show the correct staggered phase relative to each other. A dash cycle scaling to less than 1 device pixel is drawn as a solid line instead of being walked segment-by-segment — dashes finer than a pixel aren't individually resolvable anyway, and iterating them across a long visible chord (common for drafting patterns previewed before their units-based scale is applied, §9) could require millions of draw calls and hang the UI thread. A hard cap of 20,000 dash segments per visible chord is a second, defense-in-depth backstop against any other pathological combination (e.g. an extreme `Zoom`).
 
 Stroke thickness is fixed at `1` device unit; there is no `StrokeThicknessOverride`. `LineBrush` controls color only.
 
@@ -88,10 +90,12 @@ See §8 in the codebase's `PatternMaker/` folder (`PatternDomain`, `PatternSafeG
 Because of this, enabling `UsePatternMaker` on an arbitrary existing `.pat` (especially multi-family patterns like a brick detail) does not reproduce the source pattern; it currently exists as an experimental path only. **Do not enable it for accurate preview.** Recommendation: either remove this path, or rework it as a clearly separate "pattern authoring helper" feature outside the `FillPatternPreview` control's rendering contract, so a future default-flip or accidental `UsePatternMaker = true` (as happened during development of this spec) can't silently produce incorrect previews again.
 
 ## 9. Transforms & Units
-- `EffectiveScale = Scale * Zoom`, applied uniformly to all coordinates read from the pattern.
+- `EffectiveScale = Scale * Zoom * UnitsToDipFactor(pattern)`, applied uniformly to all coordinates read from the pattern.
+- `UnitsToDipFactor` (`GetUnitsToDipFactor` in `FillPatternPreview.cs`) is `1.0` for **model** patterns — their native units are real-world/model size, and their "correct" apparent size is inherently a matter of view zoom, not a fixed conversion, so `Scale`/`Zoom` are the only controls and default to a plain 1-native-unit-to-1-DIP mapping.
+- For **drafting** patterns, native units are paper/plot units by convention (inches unless `%UNITS=` says otherwise), and WPF's own device-independent unit is defined as exactly 1/96 inch — so `UnitsToDipFactor` converts the pattern's declared unit to inches and multiplies by 96, giving a "print-true" default: at `Scale=1` (its default), a drafting pattern renders at the same size it would print at 100%, with **no per-pattern manual scale calculation needed**. Recognized units: `INCH` (default when `%UNITS=` is absent, matching AutoCAD/Revit convention) → `96`; `MM` → `96/25.4`; `CM` → `96/2.54`; `M`/`METER` → `96/0.0254`; `FOOT`/`FT` → `96*12`. An unrecognized unit string falls back to the inch factor.
+- `Scale` and `Zoom` still apply on top of this as user-controlled multipliers (e.g. for interactive zoom) — the units factor only establishes the *default* (`Scale=1, Zoom=1`) baseline.
 - `PanOffset` is a declared property with no effect (see §6).
-- No DPI-awareness: stroke thickness is not adjusted for `VisualTreeHelper.GetDpi` or `SnapsToDevicePixels` (the latter isn't implemented as a DP at all).
-- No units-aware default scale: model vs. drafting patterns, and different `%UNITS=` values, are all rendered with the same `Scale`/`Zoom` math — the caller must know the pattern's native units and set `Scale` accordingly.
+- No DPI-awareness: stroke thickness is not adjusted for `VisualTreeHelper.GetDpi` or `SnapsToDevicePixels` (the latter isn't implemented as a DP at all) — the 96-DIP-per-inch assumption above is a fixed constant, not the *actual* screen DPI, which is what "print-true at 100% zoom on a 96 DPI-normalized WPF surface" means in practice (WPF already normalizes DIPs this way regardless of physical monitor DPI).
 
 ## 10. Error Handling
 - File not found: `ParseFile` returns a result with an error message; the control catches exceptions from `ParseFile`/`ParseText` and logs to `Debug.WriteLine` rather than throwing or crashing the UI thread.
@@ -106,7 +110,7 @@ There is currently no automated test project in this repository. Verification du
 Recommendation for v2: add an automated test project (xUnit) covering parser edge cases (headers, comments-only input, malformed tokens, duplicate names, `%TYPE` on both header and standalone lines) and, if feasible, pixel-diff rendering tests for the angle/dash regression cases above so they can't silently regress again.
 
 ## 12. Security & Reliability
-No external network IO. File access is limited to the path the caller supplies. No explicit bound on total lines parsed or total repeats rendered beyond the per-family 4000-repeat cap in §8 (a pattern with very many families, each near that cap, has no aggregate cap).
+No external network IO. File access is limited to the path the caller supplies. No explicit bound on total lines parsed or total repeats rendered beyond the per-family 4000-repeat cap in §8 (a pattern with very many families, each near that cap, has no aggregate cap) and the per-chord 20,000-dash-segment cap (§8). Before that dash-segment cap and the sub-pixel solid-line shortcut were added, a legitimate drafting `.pat` previewed before its units-based scale (§9) was applied — i.e. any drafting pattern rendered at `Scale=1` prior to that feature — could hang the UI thread indefinitely: native dash values far smaller than a device pixel, multiplied across many line groups and a wide viewport, drove dash-expansion into the hundreds of millions of draw calls. Both issues are now mitigated, but there is still no aggregate cross-family work budget, so a sufficiently adversarial combination of many families each individually under both caps remains a theoretical slow-render risk.
 
 ## 13. Deferred to v2
 Preserved from the original design draft as a roadmap — **none of the following is implemented today**:
@@ -116,7 +120,6 @@ Preserved from the original design draft as a roadmap — **none of the followin
 - **Interaction**: `IsInteractive` DP; mouse-wheel zoom around cursor; drag-to-pan; double-click reset; keyboard zoom/pan/reset; `InteractionChanged` event.
 - **Accessibility**: custom `AutomationPeer` exposing pattern name/description/`IsModel`/diagnostic summary.
 - **Extensibility**: `IFillPatternSource`, `IPatternRenderer` strategy interfaces; pluggable logger for parse/render lifecycle events.
-- **Units-aware scaling**: parse and store `%UNITS=`, and use it (plus `IsModel`) to pick a sensible default `Scale` per pattern rather than requiring the caller to know it.
 - **Parser correctness/robustness gaps carried forward from §7**: first-wins duplicate-name resolution (currently last-wins), dash-length clamping with warning, file-level parse cache keyed by (path, last-write-time, content hash).
 - **DP coercion**: clamp `Zoom` to a sane range (e.g. 0.1–20) and reject/coerce non-positive `Scale` at the dependency-property level via `CoerceValueCallback`, rather than only guarding at render time.
 - **`PanOffset`**: actually apply it in `OnRender` (currently a no-op property).

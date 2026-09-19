@@ -36,6 +36,10 @@ public static class PatParser
         var patterns = new Dictionary<string, PatternDefinition>(StringComparer.OrdinalIgnoreCase);
 
         PatternBuilder? current = null;
+        // %UNITS=... is conventionally a file-level declaration (before the first pattern
+        // header) that applies to every pattern in the file, though it may also be repeated
+        // per-pattern; track the most recently seen value and apply it to each new pattern.
+        string? fileUnits = null;
         int lineNo = 0;
         foreach (var raw in ReadLines(text))
         {
@@ -50,7 +54,16 @@ public static class PatParser
             {
                 // %TYPE=MODEL/DRAFTING conventionally appears as its own comment line
                 // immediately after the header, not inline on the "*Name" line.
-                if (current != null)
+                var unitsTag = TryParseUnitsTag(line[1..]);
+                if (unitsTag != null)
+                {
+                    fileUnits = unitsTag;
+                    if (current != null)
+                    {
+                        current.Units = unitsTag;
+                    }
+                }
+                else if (current != null)
                 {
                     ApplyTypeTag(line[1..], lineNo, warnings, current);
                 }
@@ -90,7 +103,7 @@ public static class PatParser
                     errors.Add($"Line {lineNo}: Empty pattern name.");
                     continue;
                 }
-                current = new PatternBuilder(name, description);
+                current = new PatternBuilder(name, description) { Units = fileUnits };
                 if (!string.IsNullOrWhiteSpace(trailingComment))
                 {
                     ApplyTypeTag(trailingComment, lineNo, warnings, current);
@@ -191,6 +204,24 @@ public static class PatParser
         }
     }
 
+    private static string? TryParseUnitsTag(string commentText)
+    {
+        var tagIndex = commentText.IndexOf("%UNITS=", StringComparison.OrdinalIgnoreCase);
+        if (tagIndex < 0)
+        {
+            return null;
+        }
+
+        var value = commentText[(tagIndex + 7)..].Trim();
+        int space = value.IndexOfAny([' ', '\t', ';']);
+        if (space >= 0)
+        {
+            value = value[..space];
+        }
+
+        return value.Length == 0 ? null : value.ToUpperInvariant();
+    }
+
     private static void CommitCurrent(List<string>? warnings, Dictionary<string, PatternDefinition>? patterns, ref PatternBuilder? current)
     {
         if (current == null)
@@ -198,7 +229,7 @@ public static class PatParser
             return;
         }
 
-        var def = new PatternDefinition(current.Name, current.Description, current.IsModel, current.LineGroups.ToList());
+        var def = new PatternDefinition(current.Name, current.Description, current.IsModel, current.LineGroups.ToList(), current.Units);
         if (!patterns.TryAdd(def.Name, def))
         {
             warnings.Add($"Duplicate pattern name '{def.Name}' replaced previous definition.");
@@ -230,6 +261,7 @@ public static class PatParser
         public string Name { get; }
         public string? Description { get; }
         public bool IsModel { get; set; } // default drafting
+        public string? Units { get; set; }
         public List<LineGroup> LineGroups { get; } = new();
         public PatternBuilder(string name, string? description)
         {

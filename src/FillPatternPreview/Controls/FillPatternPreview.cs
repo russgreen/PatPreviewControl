@@ -135,9 +135,35 @@ public class FillPatternPreview : Control
         }
     }
 
+    // Drafting patterns are authored in paper/plot units (inches by convention, or whatever
+    // %UNITS= declares), not screen pixels, so a native unit has no natural pixel size on its
+    // own - unlike model patterns, which are real-world sizes that scale with view zoom. WPF's
+    // own device-independent unit is defined as 1/96 inch, so "96 DIPs per inch" is the one
+    // print-true default that requires no per-pattern guessing: at Scale=1 (its default), a
+    // drafting pattern renders at the same size it would print at 100%. Model patterns are
+    // left at a 1:1 native-unit-to-DIP factor, since their "correct" apparent size is inherently
+    // a matter of view zoom, not a fixed paper conversion.
+    private static double GetUnitsToDipFactor(PatternDefinition? pattern)
+    {
+        if (pattern == null || pattern.IsModel)
+        {
+            return 1.0;
+        }
+
+        const double DipsPerInch = 96.0;
+        return pattern.Units switch
+        {
+            "MM" or "MILLIMETER" or "MILLIMETERS" => DipsPerInch / 25.4,
+            "CM" or "CENTIMETER" or "CENTIMETERS" => DipsPerInch / 2.54,
+            "M" or "METER" or "METERS" => DipsPerInch / 0.0254,
+            "FOOT" or "FEET" or "FT" => DipsPerInch * 12.0,
+            _ => DipsPerInch, // INCH, unspecified: AutoCAD/Revit default drafting-pattern unit
+        };
+    }
+
     private void RenderLegacy(DrawingContext dc, Rect rect, PatternDefinition pattern)
     {
-        var stroke = LineBrush ?? Brushes.Black; var pen = new Pen(stroke,1); double scale = Math.Max(0.0001, Scale*Zoom);
+        var stroke = LineBrush ?? Brushes.Black; var pen = new Pen(stroke,1); double scale = Math.Max(0.0001, Scale*Zoom*GetUnitsToDipFactor(pattern));
         foreach (var g in pattern.LineGroups)
         {
             double angleRad = g.AngleDeg * Math.PI/180.0; var dir = new Vector(Math.Cos(angleRad), Math.Sin(angleRad)); if (dir.LengthSquared<1e-12)
@@ -188,7 +214,7 @@ public class FillPatternPreview : Control
 
     private void RenderWithPatternMaker(DrawingContext dc, Rect rect, PatternMakerAdapter.ConvertedPattern converted)
     {
-        var stroke = LineBrush ?? Brushes.Black; var pen = new Pen(stroke,1); double scale = Math.Max(0.0001, Scale*Zoom);
+        var stroke = LineBrush ?? Brushes.Black; var pen = new Pen(stroke,1); double scale = Math.Max(0.0001, Scale*Zoom*GetUnitsToDipFactor(converted.Source));
         foreach (var grid in converted.Grids)
         {
             double angle = grid.Angle; var dir = new Vector(Math.Cos(angle), Math.Sin(angle)); var normal = new Vector(-dir.Y, dir.X);
@@ -237,11 +263,27 @@ public class FillPatternPreview : Control
         // 'delta' parallel to the line direction shifts this phase between parallel copies to
         // produce staggered/coursed patterns (e.g. brick bonds), so it must be preserved here.
         double cycleLength = scaled.Sum(v => Math.Abs(v));
+
+        // Drafting patterns are authored in tiny native units (a plot-scale multiplier is
+        // expected before display), so a cycle can come out far smaller than a device pixel
+        // when previewed at Scale=1. Walking such a cycle segment-by-segment across a long
+        // visible chord would require millions of draw calls for no visible difference from a
+        // solid line - draw solid instead of hanging the UI thread.
+        if (cycleLength < 1.0)
+        {
+            dc.DrawLine(pen, p1, p2);
+            return;
+        }
+
         double offsetAlongDir = Vector.Multiply(p1 - basePoint, dir);
-        double phase = cycleLength > 1e-9 ? ((offsetAlongDir % cycleLength) + cycleLength) % cycleLength : 0;
+        double phase = ((offsetAlongDir % cycleLength) + cycleLength) % cycleLength;
 
         double pos = -phase; int idx = 0;
-        while(pos<length){ double dash=scaled[idx]; idx=(idx+1)%scaled.Length; if(Math.Abs(dash)<1e-9){ double dotPos=pos; if(dotPos>=0 && dotPos<length){ var pt=p1+dir*dotPos; dc.DrawRectangle(pen.Brush,null,new Rect(pt.X-pen.Thickness/2,pt.Y-pen.Thickness/2,pen.Thickness,pen.Thickness)); } pos+=pen.Thickness*2; continue;} bool draw=dash>0; double segLen=Math.Abs(dash); double start=Math.Max(0,pos); double end=Math.Min(length,pos+segLen); if(draw && end>start){ var sp=p1+dir*start; var ep=p1+dir*end; dc.DrawLine(pen,sp,ep);} pos+=segLen; }
+        // Safety net for any other pathological combination (e.g. a huge Zoom) that produces
+        // an unreasonable segment count despite the cycle-length guard above.
+        const int maxIterations = 20000;
+        int iterations = 0;
+        while(pos<length && iterations++<maxIterations){ double dash=scaled[idx]; idx=(idx+1)%scaled.Length; if(Math.Abs(dash)<1e-9){ double dotPos=pos; if(dotPos>=0 && dotPos<length){ var pt=p1+dir*dotPos; dc.DrawRectangle(pen.Brush,null,new Rect(pt.X-pen.Thickness/2,pt.Y-pen.Thickness/2,pen.Thickness,pen.Thickness)); } pos+=pen.Thickness*2; continue;} bool draw=dash>0; double segLen=Math.Abs(dash); double start=Math.Max(0,pos); double end=Math.Min(length,pos+segLen); if(draw && end>start){ var sp=p1+dir*start; var ep=p1+dir*end; dc.DrawLine(pen,sp,ep);} pos+=segLen; }
     }
 
     private static bool TryIntersectInfiniteLineWithRect(Point pointOnLine, Vector direction, Rect rect, out Point p1, out Point p2)
