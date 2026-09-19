@@ -13,7 +13,6 @@ public partial class MainWindow : Window
     private void OnApply(object sender, RoutedEventArgs e)
     {
         Preview.PatRawText = PatTextBox.Text;
-        Preview.UsePatternMaker = true;
         Preview.PatPatternName = string.IsNullOrWhiteSpace(PatternNameBox.Text) ? null : PatternNameBox.Text.Trim();
     }
 }

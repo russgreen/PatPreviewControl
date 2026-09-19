@@ -48,6 +48,12 @@ public static class PatParser
 
             if (line[0] == ';') // full line comment
             {
+                // %TYPE=MODEL/DRAFTING conventionally appears as its own comment line
+                // immediately after the header, not inline on the "*Name" line.
+                if (current != null)
+                {
+                    ApplyTypeTag(line[1..], lineNo, warnings, current);
+                }
                 continue;
             }
 
@@ -84,31 +90,11 @@ public static class PatParser
                     errors.Add($"Line {lineNo}: Empty pattern name.");
                     continue;
                 }
-                bool isModel = false; // default drafting
+                current = new PatternBuilder(name, description);
                 if (!string.IsNullOrWhiteSpace(trailingComment))
                 {
-                    // Look for %TYPE=MODEL or %TYPE=DRAFTING (case-insensitive)
-                    var tagIndex = trailingComment.IndexOf("%TYPE=", StringComparison.OrdinalIgnoreCase);
-                    if (tagIndex >= 0)
-                    {
-                        var typeValue = trailingComment[(tagIndex + 6)..].Trim();
-                        int space = typeValue.IndexOfAny([' ', '\t', ';']);
-                        if (space >= 0)
-                        {
-                            typeValue = typeValue[..space];
-                        }
-
-                        if (typeValue.Equals("MODEL", StringComparison.OrdinalIgnoreCase))
-                        {
-                            isModel = true;
-                        }
-                        else if (!typeValue.Equals("DRAFTING", StringComparison.OrdinalIgnoreCase))
-                        {
-                            warnings.Add($"Line {lineNo}: Unknown %TYPE '{typeValue}'.");
-                        }
-                    }
+                    ApplyTypeTag(trailingComment, lineNo, warnings, current);
                 }
-                current = new PatternBuilder(name, description, isModel);
                 continue;
             }
 
@@ -175,6 +161,36 @@ public static class PatParser
         return new PatternParseResult(patterns, errors, warnings, sw.Elapsed);
     }
 
+    private static void ApplyTypeTag(string commentText, int lineNo, List<string> warnings, PatternBuilder current)
+    {
+        // Look for %TYPE=MODEL or %TYPE=DRAFTING (case-insensitive)
+        var tagIndex = commentText.IndexOf("%TYPE=", StringComparison.OrdinalIgnoreCase);
+        if (tagIndex < 0)
+        {
+            return;
+        }
+
+        var typeValue = commentText[(tagIndex + 6)..].Trim();
+        int space = typeValue.IndexOfAny([' ', '\t', ';']);
+        if (space >= 0)
+        {
+            typeValue = typeValue[..space];
+        }
+
+        if (typeValue.Equals("MODEL", StringComparison.OrdinalIgnoreCase))
+        {
+            current.IsModel = true;
+        }
+        else if (typeValue.Equals("DRAFTING", StringComparison.OrdinalIgnoreCase))
+        {
+            current.IsModel = false;
+        }
+        else
+        {
+            warnings.Add($"Line {lineNo}: Unknown %TYPE '{typeValue}'.");
+        }
+    }
+
     private static void CommitCurrent(List<string>? warnings, Dictionary<string, PatternDefinition>? patterns, ref PatternBuilder? current)
     {
         if (current == null)
@@ -213,13 +229,12 @@ public static class PatParser
     {
         public string Name { get; }
         public string? Description { get; }
-        public bool IsModel { get; }
+        public bool IsModel { get; set; } // default drafting
         public List<LineGroup> LineGroups { get; } = new();
-        public PatternBuilder(string name, string? description, bool isModel)
+        public PatternBuilder(string name, string? description)
         {
             Name = name;
             Description = description;
-            IsModel = isModel;
         }
     }
 }

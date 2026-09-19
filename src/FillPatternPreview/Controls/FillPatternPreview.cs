@@ -147,19 +147,32 @@ public class FillPatternPreview : Control
 
             dir.Normalize(); var normal = new Vector(-dir.Y, dir.X);
             var origin = new Point(g.OriginX*scale, g.OriginY*scale);
-            var delta = new Vector(g.DeltaX*scale, g.DeltaY*scale);
-            double offsetDist = Math.Abs(Vector.Multiply(delta, normal)); if (offsetDist < 1e-6)
+            // DeltaX/DeltaY are defined in the line family's own rotated frame, not world space:
+            // the along-direction component is the dash-phase shift between copies (produces
+            // staggered/coursed patterns), the perpendicular component is the copy spacing.
+            var delta = (dir*g.DeltaX + normal*g.DeltaY) * scale;
+            // perpStep is the SIGNED change in projection-onto-normal per unit k (delta·normal);
+            // it can be negative depending on the family's angle/offset sign. offsetDist is only
+            // its magnitude, used for rect-margin padding - using offsetDist's sign (always +) to
+            // derive kMin/kMax instead of perpStep's real sign silently clamped kMax near zero for
+            // any family where a positive k step actually decreases the projection.
+            double perpStep = Vector.Multiply(delta, normal);
+            double offsetDist = Math.Abs(perpStep);
+            if (offsetDist < 1e-6)
             {
                 offsetDist = delta.Length;
+                perpStep = offsetDist; // degenerate family (no real perpendicular component): crude positive fallback
             }
 
             if (offsetDist < 1e-6)
             {
                 offsetDist = 8*scale;
+                perpStep = offsetDist;
             }
 
             var corners = new[]{rect.TopLeft,rect.TopRight,rect.BottomLeft,rect.BottomRight}; double Project(Point p)=>p.X*normal.X+p.Y*normal.Y; double minProj=corners.Min(Project)-offsetDist; double maxProj=corners.Max(Project)+offsetDist; double originProj=Project(origin);
-            int kMin=(int)Math.Floor((minProj-originProj)/offsetDist); int kMax=(int)Math.Ceiling((maxProj-originProj)/offsetDist); if(kMax-kMin>4000)
+            double kAtMin=(minProj-originProj)/perpStep; double kAtMax=(maxProj-originProj)/perpStep;
+            int kMin=(int)Math.Floor(Math.Min(kAtMin,kAtMax)); int kMax=(int)Math.Ceiling(Math.Max(kAtMin,kAtMax)); if(kMax-kMin>4000)
             {
                 continue;
             }
@@ -167,7 +180,7 @@ public class FillPatternPreview : Control
             for (int k=kMin;k<=kMax;k++){
                 var basePoint = origin + k*delta; if(TryIntersectInfiniteLineWithRect(basePoint,dir,rect,out var p1,out var p2))
                 {
-                    DrawDashed(dc,pen,p1,p2,dir,g.DashPattern,scale);
+                    DrawDashed(dc,pen,p1,p2,basePoint,dir,g.DashPattern,scale);
                 }
             }
         }
@@ -208,7 +221,7 @@ public class FillPatternPreview : Control
         }
     }
 
-    private static void DrawDashed(DrawingContext dc, Pen pen, Point p1, Point p2, Vector dir, System.Collections.Generic.IReadOnlyList<double> pattern, double scale)
+    private static void DrawDashed(DrawingContext dc, Pen pen, Point p1, Point p2, Point basePoint, Vector dir, System.Collections.Generic.IReadOnlyList<double> pattern, double scale)
     {
         if(pattern.Count==0){ dc.DrawLine(pen,p1,p2); return; }
         var lineVec = p2-p1; double length = lineVec.Length; if(length<0.5)
@@ -216,8 +229,19 @@ public class FillPatternPreview : Control
             return;
         }
 
-        dir.Normalize(); double pos=0; int idx=0; var scaled = pattern.Select(v=>v*scale).ToArray(); if(scaled.All(v=>Math.Abs(v)<1e-9)){ dc.DrawLine(pen,p1,p2); return; }
-        while(pos<length){ double dash=scaled[idx]; idx=(idx+1)%scaled.Length; if(Math.Abs(dash)<1e-9){ var pt=p1+dir*pos; dc.DrawRectangle(pen.Brush,null,new Rect(pt.X-pen.Thickness/2,pt.Y-pen.Thickness/2,pen.Thickness,pen.Thickness)); pos+=pen.Thickness*2; continue;} bool draw=dash>0; double segLen=Math.Abs(dash); double start=pos; double end=Math.Min(length,pos+segLen); if(draw && end>start){ var sp=p1+dir*start; var ep=p1+dir*end; dc.DrawLine(pen,sp,ep);} pos+=segLen; }
+        dir.Normalize();
+        var scaled = pattern.Select(v=>v*scale).ToArray(); if(scaled.All(v=>Math.Abs(v)<1e-9)){ dc.DrawLine(pen,p1,p2); return; }
+
+        // The dash cycle is anchored to the line family's true origin (basePoint), not to
+        // wherever the infinite line happens to clip the visible rect (p1). The component of
+        // 'delta' parallel to the line direction shifts this phase between parallel copies to
+        // produce staggered/coursed patterns (e.g. brick bonds), so it must be preserved here.
+        double cycleLength = scaled.Sum(v => Math.Abs(v));
+        double offsetAlongDir = Vector.Multiply(p1 - basePoint, dir);
+        double phase = cycleLength > 1e-9 ? ((offsetAlongDir % cycleLength) + cycleLength) % cycleLength : 0;
+
+        double pos = -phase; int idx = 0;
+        while(pos<length){ double dash=scaled[idx]; idx=(idx+1)%scaled.Length; if(Math.Abs(dash)<1e-9){ double dotPos=pos; if(dotPos>=0 && dotPos<length){ var pt=p1+dir*dotPos; dc.DrawRectangle(pen.Brush,null,new Rect(pt.X-pen.Thickness/2,pt.Y-pen.Thickness/2,pen.Thickness,pen.Thickness)); } pos+=pen.Thickness*2; continue;} bool draw=dash>0; double segLen=Math.Abs(dash); double start=Math.Max(0,pos); double end=Math.Min(length,pos+segLen); if(draw && end>start){ var sp=p1+dir*start; var ep=p1+dir*end; dc.DrawLine(pen,sp,ep);} pos+=segLen; }
     }
 
     private static bool TryIntersectInfiniteLineWithRect(Point pointOnLine, Vector direction, Rect rect, out Point p1, out Point p2)
@@ -253,6 +277,15 @@ public class FillPatternPreview : Control
         double best=-1; Point bp1=intersections[0], bp2=intersections[1]; for(int i=0;i<count;i++)
         {
             for (int j=i+1;j<count;j++){ var d=(intersections[i]-intersections[j]).LengthSquared; if(d>best){ best=d; bp1=intersections[i]; bp2=intersections[j]; }}
+        }
+
+        // bp1/bp2 were picked purely by max separation, with no regard to 'direction'.
+        // Callers dash-expand by walking p1 + direction*t expecting to reach p2; if that
+        // pair is backwards relative to direction, the whole dash pattern walks away from
+        // the rect and gets clipped out entirely (only solid lines are order-independent).
+        if (Vector.Multiply(bp2 - bp1, direction) < 0)
+        {
+            (bp1, bp2) = (bp2, bp1);
         }
 
         p1 =bp1; p2=bp2; return true;
