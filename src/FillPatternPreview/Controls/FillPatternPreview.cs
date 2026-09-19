@@ -1,186 +1,219 @@
 using System;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 using FillPatternPreview.Model;
+using FillPatternPreview.Parsing;
+using FillPatternPreview.Adapters;
+using FillPatternPreview.Rendering;
 
 namespace FillPatternPreview.Controls;
 
-/// <summary>
-/// Enumeration of pattern sources for the FillPatternPreview control.
-/// </summary>
-public enum PatternSource
+public class FillPatternPreview : Control
 {
-    /// <summary>No pattern source specified.</summary>
-    None,
-    /// <summary>Pattern loaded from a .pat file.</summary>
-    PatFile,
-    /// <summary>Pattern loaded from raw .pat text.</summary>
-    PatText,
-    /// <summary>Pattern loaded from a Revit FillPattern object via reflection.</summary>
-    FillPatternObject,
-    /// <summary>Pattern provided via internal model.</summary>
-    InternalModel
-}
-
-/// <summary>
-/// Enumeration of rendering modes for the pattern preview.
-/// </summary>
-public enum RenderMode
-{
-    /// <summary>Use immediate rendering (draw lines directly).</summary>
-    Immediate,
-    /// <summary>Use cached bitmap rendering with tiled brush.</summary>
-    CachedBitmap,
-    /// <summary>Automatically choose the best rendering mode.</summary>
-    Auto
-}
-
-/// <summary>
-/// A WPF control for previewing AutoCAD/Revit style hatch (fill) patterns from multiple input sources.
-/// Supports both drafting (paper) and model (world) patterns with performant tiling, zoom, pan, and diagnostics.
-/// 
-/// NOTE: This is a cross-platform compatible skeleton. The full WPF implementation with FrameworkElement,
-/// DependencyProperty, and WPF rendering should replace this when targeting Windows with WPF support.
-/// </summary>
-public class FillPatternPreview
-{
-    #region Properties
-
-    /// <summary>
-    /// Gets or sets the pattern source type.
-    /// </summary>
-    public PatternSource PatternSource { get; set; } = PatternSource.None;
-
-    /// <summary>
-    /// Gets or sets the path to the .pat file.
-    /// </summary>
-    public string? PatFilePath { get; set; }
-
-    /// <summary>
-    /// Gets or sets the raw .pat text content.
-    /// </summary>
-    public string? PatRawText { get; set; }
-
-    /// <summary>
-    /// Gets or sets the name of the pattern to select (when multiple patterns are available).
-    /// </summary>
-    public string? PatPatternName { get; set; }
-
-    /// <summary>
-    /// Gets or sets the scale factor for the pattern.
-    /// </summary>
-    public double Scale { get; set; } = 1.0;
-
-    /// <summary>
-    /// Gets or sets the zoom level for the pattern preview.
-    /// </summary>
-    public double Zoom 
-    { 
-        get => _zoom; 
-        set => _zoom = Math.Max(0.1, Math.Min(20.0, value)); 
+    static FillPatternPreview()
+    {
+        DefaultStyleKeyProperty.OverrideMetadata(typeof(FillPatternPreview), new FrameworkPropertyMetadata(typeof(FillPatternPreview)));
     }
-    private double _zoom = 1.0;
 
-    /// <summary>
-    /// Gets or sets the pan offset for the pattern preview.
-    /// </summary>
-    public Point PanOffset { get; set; } = new Point(0, 0);
+    #region Dependency Properties
+    public string? PatFilePath { get => (string?)GetValue(PatFilePathProperty); set => SetValue(PatFilePathProperty, value); }
+    public static readonly DependencyProperty PatFilePathProperty = DependencyProperty.Register(nameof(PatFilePath), typeof(string), typeof(FillPatternPreview), new PropertyMetadata(null, OnPatternSourceChanged));
 
-    /// <summary>
-    /// Gets or sets an override for the stroke thickness. If null, uses default thickness.
-    /// </summary>
-    public double? StrokeThicknessOverride { get; set; }
+    public string? PatRawText { get => (string?)GetValue(PatRawTextProperty); set => SetValue(PatRawTextProperty, value); }
+    public static readonly DependencyProperty PatRawTextProperty = DependencyProperty.Register(nameof(PatRawText), typeof(string), typeof(FillPatternPreview), new PropertyMetadata(null, OnPatternSourceChanged));
 
-    /// <summary>
-    /// Gets the current pattern definition.
-    /// </summary>
-    public PatternDefinition? Pattern { get; private set; }
+    public string? PatPatternName { get => (string?)GetValue(PatPatternNameProperty); set => SetValue(PatPatternNameProperty, value); }
+    public static readonly DependencyProperty PatPatternNameProperty = DependencyProperty.Register(nameof(PatPatternName), typeof(string), typeof(FillPatternPreview), new PropertyMetadata(null, OnPatternSourceChanged));
 
-    /// <summary>
-    /// Gets the current pattern diagnostics information.
-    /// </summary>
-    public PatternDiagnostics? Diagnostics { get; private set; }
+    public Brush LineBrush { get => (Brush)GetValue(LineBrushProperty); set => SetValue(LineBrushProperty, value); }
+    public static readonly DependencyProperty LineBrushProperty = DependencyProperty.Register(nameof(LineBrush), typeof(Brush), typeof(FillPatternPreview), new PropertyMetadata(Brushes.Black, OnVisualPropertyChanged));
+
+    public double Scale { get => (double)GetValue(ScaleProperty); set => SetValue(ScaleProperty, value); }
+    public static readonly DependencyProperty ScaleProperty = DependencyProperty.Register(nameof(Scale), typeof(double), typeof(FillPatternPreview), new PropertyMetadata(1.0, OnVisualPropertyChanged));
+
+    public double Zoom { get => (double)GetValue(ZoomProperty); set => SetValue(ZoomProperty, value); }
+    public static readonly DependencyProperty ZoomProperty = DependencyProperty.Register(nameof(Zoom), typeof(double), typeof(FillPatternPreview), new PropertyMetadata(1.0, OnVisualPropertyChanged));
+
+    public Point PanOffset { get => (Point)GetValue(PanOffsetProperty); set => SetValue(PanOffsetProperty, value); }
+    public static readonly DependencyProperty PanOffsetProperty = DependencyProperty.Register(nameof(PanOffset), typeof(Point), typeof(FillPatternPreview), new PropertyMetadata(new Point(0,0), OnVisualPropertyChanged));
+
+    public bool UsePatternMaker { get => (bool)GetValue(UsePatternMakerProperty); set => SetValue(UsePatternMakerProperty, value); }
+    public static readonly DependencyProperty UsePatternMakerProperty = DependencyProperty.Register(nameof(UsePatternMaker), typeof(bool), typeof(FillPatternPreview), new PropertyMetadata(false, OnVisualPropertyChanged));
+
+    public PatternDefinition? Pattern { get => (PatternDefinition?)GetValue(PatternProperty); private set => SetValue(PatternPropertyKey, value); }
+    private static readonly DependencyPropertyKey PatternPropertyKey = DependencyProperty.RegisterReadOnly(nameof(Pattern), typeof(PatternDefinition), typeof(FillPatternPreview), new PropertyMetadata(null, OnVisualPropertyChanged));
+    public static readonly DependencyProperty PatternProperty = PatternPropertyKey.DependencyProperty;
 
     #endregion
 
-    #region Events
-
-    /// <summary>
-    /// Occurs when the pattern changes.
-    /// </summary>
     public event EventHandler? PatternChanged;
 
-    /// <summary>
-    /// Occurs when pattern parsing fails.
-    /// </summary>
-    public event EventHandler<PatternErrorEventArgs>? ParseFailed;
+    private PatternMakerAdapter.ConvertedPattern? _pmConverted;
 
-    #endregion
-
-    #region Methods
-
-    /// <summary>
-    /// Sets the pattern and diagnostics. Used internally by the acquisition workflow.
-    /// </summary>
-    /// <param name="pattern">The pattern definition</param>
-    /// <param name="diagnostics">The diagnostics information</param>
-    protected virtual void SetPattern(PatternDefinition? pattern, PatternDiagnostics? diagnostics)
+    private static void OnPatternSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        var oldPattern = Pattern;
-        Pattern = pattern;
-        Diagnostics = diagnostics;
+        var ctrl = (FillPatternPreview)d;
+        ctrl.LoadPattern();
+    }
 
-        if (pattern != oldPattern)
+    private static void OnVisualPropertyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        ((FillPatternPreview)d).InvalidateVisual();
+    }
+
+    private void LoadPattern()
+    {
+        PatternDefinition? target = null;
+        if (!string.IsNullOrWhiteSpace(PatRawText))
         {
-            PatternChanged?.Invoke(this, EventArgs.Empty);
+            var result = PatParser.ParseText(PatRawText);
+            if (result.Patterns.Count > 0)
+            {
+                if (!string.IsNullOrWhiteSpace(PatPatternName) && result.Patterns.TryGetValue(PatPatternName, out var named))
+                {
+                    target = named;
+                }
+                else
+                {
+                    target = result.Patterns.Values.FirstOrDefault();
+                }
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(PatFilePath))
+        {
+            try
+            {
+                var result = PatParser.ParseFile(PatFilePath);
+                if (result.Patterns.Count > 0)
+                {
+                    if (!string.IsNullOrWhiteSpace(PatPatternName) && result.Patterns.TryGetValue(PatPatternName, out var named))
+                    {
+                        target = named;
+                    }
+                    else
+                    {
+                        target = result.Patterns.Values.FirstOrDefault();
+                    }
+                }
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
+        }
+        Pattern = target;
+        _pmConverted = null;
+        if (UsePatternMaker && Pattern != null)
+        {
+            try { _pmConverted = PatternMakerAdapter.Build(Pattern); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PatternMaker adapter failed: {ex.Message}"); }
+        }
+        PatternChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        base.OnRender(dc);
+        var rect = new Rect(0,0,ActualWidth,ActualHeight);
+        if (rect.IsEmpty)
+        {
+            return;
         }
 
-        if (diagnostics?.Success == false)
+        dc.DrawRectangle(Background ?? Brushes.Transparent, null, rect);
+        if (Pattern == null)
         {
-            ParseFailed?.Invoke(this, new PatternErrorEventArgs(diagnostics.Message ?? "Parse failed"));
+            return;
+        }
+
+        using var clip = new DrawingContextClip(dc, rect);
+
+        if (UsePatternMaker && _pmConverted != null)
+        {
+            RenderWithPatternMaker(dc, rect, _pmConverted);
+        }
+        else
+        {
+            RenderLegacy(dc, rect, Pattern);
         }
     }
 
-    /// <summary>
-    /// Triggers pattern acquisition based on current source settings.
-    /// </summary>
-    public virtual void RefreshPattern()
+    private void RenderLegacy(DrawingContext dc, Rect rect, PatternDefinition pattern)
     {
-        // TODO: Implement pattern acquisition workflow
-        // This is a placeholder for the full implementation
+        var stroke = LineBrush ?? Brushes.Black; var pen = new Pen(stroke,1); double scale = Math.Max(0.0001, Scale*Zoom*LineFamilyExpander.GetUnitsToDipFactor(pattern));
+        foreach (var g in pattern.LineGroups)
+        {
+            double angleRad = g.AngleDeg * Math.PI/180.0; var dir = new Vector(Math.Cos(angleRad), Math.Sin(angleRad)); if (dir.LengthSquared<1e-12)
+            {
+                continue;
+            }
+
+            dir.Normalize(); var normal = new Vector(-dir.Y, dir.X);
+            var origin = new Point(g.OriginX*scale, g.OriginY*scale);
+            var delta = LineFamilyExpander.ComputeWorldDelta(dir, normal, g.DeltaX, g.DeltaY, scale);
+            var (kMin, kMax) = LineFamilyExpander.ComputeRepeatRange(rect, origin, delta, normal, scale);
+            if (kMax-kMin>4000)
+            {
+                continue;
+            }
+
+            for (int k=kMin;k<=kMax;k++){
+                var basePoint = origin + k*delta; if(LineFamilyExpander.TryIntersectInfiniteLineWithRect(basePoint,dir,rect,out var p1,out var p2))
+                {
+                    DrawDashed(dc,pen,p1,p2,basePoint,dir,g.DashPattern,scale);
+                }
+            }
+        }
     }
 
-    #endregion
-}
-
-/// <summary>
-/// Simple point structure for cross-platform compatibility.
-/// </summary>
-/// <param name="X">The X coordinate</param>
-/// <param name="Y">The Y coordinate</param>
-public record Point(double X, double Y);
-
-/// <summary>
-/// Event arguments for pattern parsing errors.
-/// </summary>
-public class PatternErrorEventArgs : EventArgs
-{
-    /// <summary>
-    /// Gets the error message.
-    /// </summary>
-    public string Message { get; }
-
-    /// <summary>
-    /// Gets the exception, if any.
-    /// </summary>
-    public Exception? Exception { get; }
-
-    /// <summary>
-    /// Initializes a new instance of the PatternErrorEventArgs class.
-    /// </summary>
-    /// <param name="message">The error message.</param>
-    /// <param name="exception">The exception, if any.</param>
-    public PatternErrorEventArgs(string message, Exception? exception = null)
+    private void RenderWithPatternMaker(DrawingContext dc, Rect rect, PatternMakerAdapter.ConvertedPattern converted)
     {
-        Message = message;
-        Exception = exception;
+        var stroke = LineBrush ?? Brushes.Black; var pen = new Pen(stroke,1); double scale = Math.Max(0.0001, Scale*Zoom*LineFamilyExpander.GetUnitsToDipFactor(converted.Source));
+        foreach (var grid in converted.Grids)
+        {
+            double angle = grid.Angle; var dir = new Vector(Math.Cos(angle), Math.Sin(angle)); var normal = new Vector(-dir.Y, dir.X);
+            // Use Offset for spacing
+            double spacing = Math.Abs(grid.Offset); if (spacing < 1e-6)
+            {
+                spacing = grid.Span;
+            }
+
+            if (spacing < 1e-6)
+            {
+                spacing = 8;
+            }
+
+            spacing *=scale;
+            // Base origin
+            var origin = new Point(grid.Origin.U*scale, grid.Origin.V*scale);
+            var corners = new[]{rect.TopLeft,rect.TopRight,rect.BottomLeft,rect.BottomRight}; double Project(Point p)=>p.X*normal.X+p.Y*normal.Y; double minProj=corners.Min(Project)-spacing; double maxProj=corners.Max(Project)+spacing; double originProj=Project(origin);
+            int kMin=(int)Math.Floor((minProj-originProj)/spacing); int kMax=(int)Math.Ceiling((maxProj-originProj)/spacing); if(kMax-kMin>4000)
+            {
+                continue;
+            }
+
+            for (int k=kMin;k<=kMax;k++){
+                var basePoint = origin + k*normal*spacing; if(LineFamilyExpander.TryIntersectInfiniteLineWithRect(basePoint,dir,rect,out var p1,out var p2))
+                {
+                    dc.DrawLine(pen,p1,p2);
+                }
+            }
+        }
     }
+
+    private static void DrawDashed(DrawingContext dc, Pen pen, Point p1, Point p2, Point basePoint, Vector dir, System.Collections.Generic.IReadOnlyList<double> pattern, double scale)
+    {
+        foreach (var seg in LineFamilyExpander.ExpandDashSegments(p1, p2, basePoint, dir, pattern, scale, pen.Thickness))
+        {
+            if (seg.Kind == LineFamilyExpander.SegmentKind.Dot)
+            {
+                var pt = seg.Start;
+                dc.DrawRectangle(pen.Brush, null, new Rect(pt.X-pen.Thickness/2, pt.Y-pen.Thickness/2, pen.Thickness, pen.Thickness));
+            }
+            else
+            {
+                dc.DrawLine(pen, seg.Start, seg.End);
+            }
+        }
+    }
+
+    private sealed class DrawingContextClip : System.IDisposable { private readonly DrawingContext _dc; public DrawingContextClip(DrawingContext dc, Rect rect){ _dc=dc; _dc.PushClip(new RectangleGeometry(rect)); } public void Dispose()=>_dc.Pop(); }
 }
