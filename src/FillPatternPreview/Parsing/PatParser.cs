@@ -19,17 +19,51 @@ namespace FillPatternPreview.Parsing;
 /// </summary>
 public static class PatParser
 {
+    // Hard limits so hostile or corrupt input can't make parsing (which runs on the UI thread)
+    // consume unbounded time or memory. All are far beyond anything a real .pat file needs
+    // (AutoCAD's stock acad.pat is ~100 KB, ~80 patterns, at most 6 dash entries per line).
+    public const int MaxInputChars = 4 * 1024 * 1024;
+    public const int MaxLineLength = 8192;
+    public const int MaxPatterns = 10_000;
+    public const int MaxLineGroupsPerPattern = 512;
+    public const int MaxDashEntries = 64;
+    public const double MaxAbsValue = 1e9;
+
     public static PatternParseResult ParseFile(string path)
     {
-        if (!File.Exists(path))
+        try
         {
-            return new PatternParseResult(new Dictionary<string, PatternDefinition>(), new[] { $"File not found: {path}" }, null, TimeSpan.Zero);
+            if (!File.Exists(path))
+            {
+                return Failure($"File not found: {path}");
+            }
+
+            // Check the size first: File.ReadAllText on a multi-gigabyte file would stall the
+            // caller and can run out of memory.
+            long length = new FileInfo(path).Length;
+            if (length > MaxInputChars)
+            {
+                return Failure($"File is too large ({length:N0} bytes; limit {MaxInputChars:N0}): {path}");
+            }
+
+            return ParseText(File.ReadAllText(path));
         }
-        return ParseText(File.ReadAllText(path));
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or NotSupportedException or ArgumentException)
+        {
+            return Failure($"Could not read '{path}': {ex.Message}");
+        }
     }
+
+    private static PatternParseResult Failure(string error)
+        => new(new Dictionary<string, PatternDefinition>(), new[] { error }, null, TimeSpan.Zero);
 
     public static PatternParseResult ParseText(string text)
     {
+        if (text.Length > MaxInputChars)
+        {
+            return Failure($"Text is too large ({text.Length:N0} characters; limit {MaxInputChars:N0}).");
+        }
+
         var sw = Stopwatch.StartNew();
         var errors = new List<string>();
         var warnings = new List<string>();
@@ -44,6 +78,12 @@ public static class PatParser
         foreach (var raw in ReadLines(text))
         {
             lineNo++;
+            if (raw.Length > MaxLineLength)
+            {
+                errors.Add($"Line {lineNo}: Line too long ({raw.Length:N0} characters; limit {MaxLineLength:N0}).");
+                continue;
+            }
+
             var line = raw.Trim();
             if (line.Length == 0)
             {
@@ -74,6 +114,11 @@ public static class PatParser
             {
                 // Commit previous pattern
                 CommitCurrent(warnings, patterns, ref current);
+                if (patterns.Count >= MaxPatterns)
+                {
+                    errors.Add($"Line {lineNo}: Too many patterns; stopped after {MaxPatterns:N0}.");
+                    break;
+                }
 
                 // Split off trailing comment (after first ';') for header tag parsing
                 string? trailingComment = null;
@@ -136,13 +181,36 @@ public static class PatParser
                 continue;
             }
             // Parse numeric tokens invariant culture.
+            if (tokens.Length - 5 > MaxDashEntries)
+            {
+                errors.Add($"Line {lineNo}: Too many dash values ({tokens.Length - 5}; limit {MaxDashEntries}).");
+                continue;
+            }
+
+            if (current.LineGroups.Count >= MaxLineGroupsPerPattern)
+            {
+                errors.Add($"Line {lineNo}: Pattern '{current.Name}' has too many definition lines (limit {MaxLineGroupsPerPattern}); line skipped.");
+                continue;
+            }
+
             var numbers = new double[tokens.Length];
             bool allOk = true;
             for (int i = 0; i < tokens.Length; i++)
             {
-                if (!double.TryParse(tokens[i], NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out numbers[i]))
+                // double.TryParse accepts "NaN", "Infinity" and overflowing exponents like
+                // "1e999"; none of those are meaningful geometry and they poison every
+                // downstream calculation, so reject them (and absurd magnitudes) here.
+                if (!double.TryParse(tokens[i], NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out numbers[i])
+                    || !double.IsFinite(numbers[i]))
                 {
                     errors.Add($"Line {lineNo}: Invalid number '{tokens[i]}'.");
+                    allOk = false;
+                    break;
+                }
+
+                if (Math.Abs(numbers[i]) > MaxAbsValue)
+                {
+                    errors.Add($"Line {lineNo}: Value '{tokens[i]}' is out of range (limit ±{MaxAbsValue:E0}).");
                     allOk = false;
                     break;
                 }

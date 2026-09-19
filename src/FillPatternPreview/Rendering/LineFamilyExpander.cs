@@ -96,10 +96,37 @@ internal static class LineFamilyExpander
 
         double kAtMin = (minProj - originProj) / perpStep;
         double kAtMax = (maxProj - originProj) / perpStep;
-        int kMin = (int)Math.Floor(Math.Min(kAtMin, kAtMax));
-        int kMax = (int)Math.Ceiling(Math.Max(kAtMin, kAtMax));
-        return (kMin, kMax);
+        return RepeatRangeFromBounds(kAtMin, kAtMax);
     }
+
+    /// <summary>
+    /// Converts two (unordered) real-valued repeat-index bounds into an inclusive int range.
+    /// NaN/Infinity anywhere gives an empty range, never a garbage one. Casting an out-of-range
+    /// double to int is undefined (and kMax - kMin can then overflow into a negative number that
+    /// slips past <see cref="IsRepeatRangeUsable"/>, turning "skip this family" into a
+    /// multi-billion-iteration loop), so the values are clamped before converting.
+    /// </summary>
+    public static (int KMin, int KMax) RepeatRangeFromBounds(double boundA, double boundB)
+    {
+        if (!double.IsFinite(boundA) || !double.IsFinite(boundB))
+        {
+            return (0, -1);
+        }
+
+        return (ClampToIndex(Math.Floor(Math.Min(boundA, boundB))), ClampToIndex(Math.Ceiling(Math.Max(boundA, boundB))));
+    }
+
+    /// <summary>Most copies of one line family that will be enumerated in a render pass; families
+    /// needing more are skipped entirely rather than truncated.</summary>
+    public const int MaxRepeatsPerFamily = 4000;
+
+    private const double MaxRepeatIndex = 1_000_000_000;
+
+    private static int ClampToIndex(double value) => (int)Math.Clamp(value, -MaxRepeatIndex, MaxRepeatIndex);
+
+    /// <summary>True when the inclusive range is small enough to enumerate. Uses long arithmetic
+    /// so extreme bounds can't overflow the subtraction.</summary>
+    public static bool IsRepeatRangeUsable(int kMin, int kMax) => (long)kMax - kMin <= MaxRepeatsPerFamily;
 
     /// <summary>
     /// Intersects the infinite line through <paramref name="pointOnLine"/> in <paramref name="direction"/>
@@ -117,6 +144,12 @@ internal static class LineFamilyExpander
         const double eps = 1e-9;
         double dx = direction.X, dy = direction.Y;
         if (Math.Abs(dx) < eps && Math.Abs(dy) < eps)
+        {
+            return false;
+        }
+
+        // Non-finite input would yield NaN/Infinity chord endpoints, which then reach DrawLine.
+        if (!double.IsFinite(pointOnLine.X + pointOnLine.Y + dx + dy + rect.Left + rect.Top + rect.Right + rect.Bottom))
         {
             return false;
         }
@@ -206,13 +239,18 @@ internal static class LineFamilyExpander
 
         var lineVec = p2 - p1;
         double length = lineVec.Length;
-        if (length < 0.5)
+        if (!(length >= 0.5) || !double.IsFinite(length))
         {
-            yield break;
+            yield break; // also catches NaN, which `length < 0.5` would let through
         }
 
         dir.Normalize();
         var scaled = pattern.Select(v => v * scale).ToArray();
+        if (scaled.Any(v => !double.IsFinite(v)))
+        {
+            yield break;
+        }
+
         if (scaled.All(v => Math.Abs(v) < 1e-9))
         {
             yield return DashSegment.LineSegment(p1, p2);

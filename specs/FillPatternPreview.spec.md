@@ -15,7 +15,7 @@ This document describes the **v1 implementation as it actually exists in this re
 - Units-aware default scale: `%UNITS=` is parsed and, for drafting patterns, automatically converted to a print-true device-pixel scale (§9) — no per-pattern manual `Scale` calculation needed.
 - An experimental, opt-in alternate rendering path (`UsePatternMaker`) that is **not** a faithful interpreter of arbitrary `.pat` content — see §8.
 
-**Out of scope for v1** — see §13 for the full list; headline items: geometry/tile caching, Revit `FillPattern` reflection adapter, mouse/keyboard interaction (zoom/pan), accessibility automation peer, a wired-up `Diagnostics` property/event.
+**Out of scope for v1** — see §13 for the full list; headline items: geometry/tile caching, Revit `FillPattern` reflection adapter, accessibility automation peer, a wired-up `Diagnostics` property/event.
 
 ## 4. Core Concepts
 - **PatternDefinition**: name, optional description, `IsModel` flag, list of `LineGroup`s.
@@ -43,15 +43,26 @@ Implemented on `FillPatternPreview` (`Controls/FillPatternPreview.cs`):
 - `PatRawText` (string?) — raw `.pat` text to parse. Takes precedence over `PatFilePath` when both are set.
 - `PatPatternName` (string?) — selects a specific pattern by name from a multi-pattern file/text; when omitted, the first parsed pattern is used.
 - `LineBrush` (Brush, default `Brushes.Black`) — stroke brush for all rendered lines.
-- `Scale` (double, default `1.0`) — world-unit-to-device-pixel multiplier. **Not clamped or coerced**; a value `<= 0` is guarded at render time only (`Math.Max(0.0001, Scale*Zoom)`), not via `CoerceValueCallback`.
-- `Zoom` (double, default `1.0`) — multiplies with `Scale`. **Not clamped** to any range (the originally-envisioned 0.1–20 clamp in §13 was never implemented).
-- `PanOffset` (Point, default `(0,0)`) — declared but **not currently applied** anywhere in `OnRender`; setting it has no visible effect today.
+- `Scale` (double, default `1.0`) — world-unit-to-device-pixel multiplier. Coerced via `CoerceValueCallback` to `[0.0001, 1e6]`; NaN becomes `1.0`. A render-time guard (`Math.Max(0.0001, ...)`, non-finite -> 1) remains as a last line of defence.
+- `Zoom` (double, default `1.0`) — multiplies with `Scale`. Coerced to the same `[0.0001, 1e6]` range as `Scale` (NaN becomes `1.0`). The narrower 0.1–20 clamp applies only to interactive zoom (§6a); the originally-envisioned 0.1–20 clamp on the DP itself was not adopted.
+- `PanOffset` (Point, default `(0,0)`) — shifts the pattern by this amount in the pattern's native units (device offset = `PanOffset * EffectiveScale`), so the visible region of the pattern plane moves under a fixed pattern origin.
+- `IsInteractive` (bool, default `false`) — enables the interaction in §6a.
 - `UsePatternMaker` (bool, default `false`) — see §8. Leave at its default for accurate previews.
 - `Pattern` (PatternDefinition?, read-only) — the currently resolved pattern, or `null` if nothing parsed successfully.
 
 Event: `PatternChanged` — raised whenever the resolved `Pattern` is recomputed (source property changed), regardless of whether parsing succeeded.
 
-Not implemented: `PatternSource` enum, `RevitFillPattern`, `StrokeThicknessOverride`, `IsModelPatternOverride`, `RenderMode`, `TileSizeHint`, `ShowBounds`, `ErrorTemplate`/`FallbackVisual`, `IsInteractive`, `SnapsToDevicePixels`, `Diagnostics`. `ParseFailed` / `InteractionChanged` events are not implemented.
+Event: `InteractionChanged` — raised after user interaction (§6a) actually changes `Zoom` or `PanOffset`, including a reset. Not raised when the properties are set programmatically.
+
+Not implemented: `PatternSource` enum, `RevitFillPattern`, `StrokeThicknessOverride`, `IsModelPatternOverride`, `RenderMode`, `TileSizeHint`, `ShowBounds`, `ErrorTemplate`/`FallbackVisual`, `SnapsToDevicePixels`, `Diagnostics`. The `ParseFailed` event is not implemented.
+
+## 6a. Interaction
+Active only when `IsInteractive` is true. The view maps a pattern point `w` to the device point `(w + PanOffset) * EffectiveScale` (§9). Math lives in `Rendering/InteractionMath.cs`.
+- **Wheel**: zoom by `1.1^(delta/120)`, clamped to `Zoom` in `[0.1, 20]`; `PanOffset` is adjusted so the pattern point under the cursor stays under it.
+- **Drag** (left button, mouse captured): pans by the pointer delta divided by `EffectiveScale`.
+- **Double-click**: resets `Zoom = 1`, `PanOffset = (0,0)`.
+- **Keyboard** (control must have focus; a click focuses it): `+`/`-` (main row or numpad) zoom by 1.1x about the control centre; arrow keys pan by 10 device units, moving the pattern in the arrow's direction; `Ctrl+0` resets.
+- The 0.1-20 clamp applies to interaction only; setting `Zoom` directly is only coerced to the wider `[0.0001, 1e6]` range (§6).
 
 ## 7. Parsing (`PatParser`)
 ### Input Forms
@@ -64,7 +75,7 @@ Not implemented: `PatternSource` enum, `RevitFillPattern`, `StrokeThicknessOverr
 - **Type declaration** (`%TYPE=MODEL` / `%TYPE=DRAFTING`): recognized both as a trailing comment on the header line itself (`*Name ;%TYPE=MODEL`) and — the far more common real-world form, matching `Constants.PAT_FILE_TEMPLATE`'s own output — as its own standalone comment line immediately following the header. An unrecognized `%TYPE=` value is recorded as a warning and does not change `IsModel`. Absent any `%TYPE=` tag, `IsModel` defaults to `false` (drafting).
 - **Definition lines**: comma-separated tokens, `AngleDeg, OriginX, OriginY, DeltaX, DeltaY[, dash1, dash2, ...]`. At least 5 numeric tokens are required; the dash list may be empty (solid line) or arbitrarily long (not limited to exactly one dash + one gap). All tokens are parsed with `double.TryParse` using `NumberStyles.Float | NumberStyles.AllowThousands` and `CultureInfo.InvariantCulture`. A line with fewer than 5 tokens, or any unparsable token, is recorded as an error and skipped — it does not abort the rest of the file.
 - **Duplicate pattern names**: **the last definition wins**, replacing any earlier one under the same name, with a warning recorded. (This is the opposite of "first wins" — if first-wins semantics are ever required, this is a one-line change in `CommitCurrent`.)
-- **No dash-length clamping**: arbitrarily large dash values are accepted as-is; there is no `MaxSegment` cap or associated warning.
+- **Limits** (hostile/corrupt input; all far above real files): input <= 4 MiB (`ParseFile` checks the file size before reading); line <= 8192 chars; <= 10,000 patterns (parsing stops with an error); <= 512 definition lines per pattern and <= 64 dash entries per line (extra/over-long lines are skipped with an error). Any number that is NaN, Infinity, overflows on parse, or has |value| > 1e9 makes that line an error. There is no dash-length *clamping* with a warning - values within the range are used as-is.
 - A pattern with zero definition lines is committed anyway (so it appears in `Patterns`) with a warning, rather than being dropped.
 
 ## 8. Rendering
@@ -94,11 +105,12 @@ Because of this, enabling `UsePatternMaker` on an arbitrary existing `.pat` (esp
 - `UnitsToDipFactor` (`GetUnitsToDipFactor` in `FillPatternPreview.cs`) is `1.0` for **model** patterns — their native units are real-world/model size, and their "correct" apparent size is inherently a matter of view zoom, not a fixed conversion, so `Scale`/`Zoom` are the only controls and default to a plain 1-native-unit-to-1-DIP mapping.
 - For **drafting** patterns, native units are paper/plot units by convention (inches unless `%UNITS=` says otherwise), and WPF's own device-independent unit is defined as exactly 1/96 inch — so `UnitsToDipFactor` converts the pattern's declared unit to inches and multiplies by 96, giving a "print-true" default: at `Scale=1` (its default), a drafting pattern renders at the same size it would print at 100%, with **no per-pattern manual scale calculation needed**. Recognized units: `INCH` (default when `%UNITS=` is absent, matching AutoCAD/Revit convention) → `96`; `MM` → `96/25.4`; `CM` → `96/2.54`; `M`/`METER` → `96/0.0254`; `FOOT`/`FT` → `96*12`. An unrecognized unit string falls back to the inch factor.
 - `Scale` and `Zoom` still apply on top of this as user-controlled multipliers (e.g. for interactive zoom) — the units factor only establishes the *default* (`Scale=1, Zoom=1`) baseline.
-- `PanOffset` is a declared property with no effect (see §6).
+- `PanOffset` is in pattern-native units and translates the rendered pattern by `PanOffset * EffectiveScale` device units (see §6, §6a).
 - No DPI-awareness: stroke thickness is not adjusted for `VisualTreeHelper.GetDpi` or `SnapsToDevicePixels` (the latter isn't implemented as a DP at all) — the 96-DIP-per-inch assumption above is a fixed constant, not the *actual* screen DPI, which is what "print-true at 100% zoom on a 96 DPI-normalized WPF surface" means in practice (WPF already normalizes DIPs this way regardless of physical monitor DPI).
 
 ## 10. Error Handling
-- File not found: `ParseFile` returns a result with an error message; the control catches exceptions from `ParseFile`/`ParseText` and logs to `Debug.WriteLine` rather than throwing or crashing the UI thread.
+- File not found, unreadable, locked, or too large: `ParseFile` returns a result with an error message (IO, permission, and invalid-path exceptions are caught inside it). The control additionally catches anything thrown while loading a pattern (result: `Pattern == null`) and anything thrown from `OnRender` (result: pattern left undrawn), logging to `Debug.WriteLine` - an exception escaping either would otherwise be an unhandled UI-thread exception in the host app.
+- `Scale` and `Zoom` are coerced to `[0.0001, 1e6]` (NaN becomes 1) and `PanOffset` to finite values within +/-1e9, so a bad binding can't drive the renderer into pathological work.
 - Malformed definition line: recorded as an error and skipped; parsing continues. There is currently no "if all lines invalid, fail the whole pattern" special case — a pattern with zero valid line groups is still added to `Patterns` with a warning (§7).
 - No `DesignerProperties.GetIsInDesignMode` guard exists; the try/catch around parsing incidentally covers most design-time failure modes today.
 
@@ -114,6 +126,8 @@ Run with `dotnet test` (or target the project directly: `dotnet test tests/FillP
 Not yet covered, left for v2: visual/pixel-diff tests via `RenderTargetBitmap` (harder to keep stable across DPI/font-rendering differences than the geometry-level tests above, which check exact computed coordinates instead); the `RenderWithPatternMaker`/`PatternMaker` path (deliberately - see §8, it's flagged for removal/rework rather than being tested as-is); CI wiring to run `dotnet test` automatically.
 
 ## 12. Security & Reliability
+Render-time work is bounded three ways: the per-family repeat cap and per-chord dash-segment cap (§8), and a **per-render-pass `RenderBudget` of 250,000 units** (one per visible chord and per drawn dash segment) that caps the total across all families - when it runs out the rest of the pattern is simply not drawn. The stroke `Pen` and a snapshot of its brush are frozen before drawing: with an unfrozen pen, WPF's per-draw-call bookkeeping made cost grow quadratically (a 512-family pattern didn't finish in 30 s even with the budget lifted, because the cost was in recording draw calls, not generating them). Repeat-index math clamps before casting to `int` and compares in `long`, because an out-of-range double-to-int cast can wrap and turn "skip this family" into a multi-billion-iteration loop. Remaining gaps: parsing and file IO are synchronous on the UI thread (bounded by the limits in §7, but a hung network path can still block), and there is no cancellation.
+
 No external network IO. File access is limited to the path the caller supplies. No explicit bound on total lines parsed or total repeats rendered beyond the per-family 4000-repeat cap in §8 (a pattern with very many families, each near that cap, has no aggregate cap) and the per-chord 20,000-dash-segment cap (§8). Before that dash-segment cap and the sub-pixel solid-line shortcut were added, a legitimate drafting `.pat` previewed before its units-based scale (§9) was applied — i.e. any drafting pattern rendered at `Scale=1` prior to that feature — could hang the UI thread indefinitely: native dash values far smaller than a device pixel, multiplied across many line groups and a wide viewport, drove dash-expansion into the hundreds of millions of draw calls. Both issues are now mitigated, but there is still no aggregate cross-family work budget, so a sufficiently adversarial combination of many families each individually under both caps remains a theoretical slow-render risk.
 
 ## 13. Deferred to v2
@@ -121,12 +135,10 @@ Preserved from the original design draft as a roadmap — **none of the followin
 - **Multi-source input**: `PatternSource` enum, `RevitFillPattern` reflection adapter (detect `Autodesk.Revit.DB.FillPattern`, extract `IsModel`/name/segments without a hard assembly reference), internal-model source.
 - **Tiled/cached rendering**: compute a minimal repeating tile domain per pattern, build a frozen `DrawingBrush { TileMode=Tile }` once and reuse it, with a geometry cache (LRU, ~16 entries) keyed by pattern hash + stroke-thickness bucket + tile-size hint, falling back to immediate mode when a tile is non-periodic or exceeds a size cap (e.g. 4096 px).
 - **Diagnostics**: populate and expose the existing `PatternDiagnostics` record via a `Diagnostics` DP; raise `ParseFailed` on failed parses; a static "last diagnostics" helper for tooling.
-- **Interaction**: `IsInteractive` DP; mouse-wheel zoom around cursor; drag-to-pan; double-click reset; keyboard zoom/pan/reset; `InteractionChanged` event.
 - **Accessibility**: custom `AutomationPeer` exposing pattern name/description/`IsModel`/diagnostic summary.
 - **Extensibility**: `IFillPatternSource`, `IPatternRenderer` strategy interfaces; pluggable logger for parse/render lifecycle events.
 - **Parser correctness/robustness gaps carried forward from §7**: first-wins duplicate-name resolution (currently last-wins), dash-length clamping with warning, file-level parse cache keyed by (path, last-write-time, content hash).
-- **DP coercion**: clamp `Zoom` to a sane range (e.g. 0.1–20) and reject/coerce non-positive `Scale` at the dependency-property level via `CoerceValueCallback`, rather than only guarding at render time.
-- **`PanOffset`**: actually apply it in `OnRender` (currently a no-op property).
+- **DP coercion**: done for `Scale`/`Zoom`/`PanOffset` (§6). Not done: a tighter `Zoom` range (e.g. 0.1–20) on the property itself.
 - **`StrokeThicknessOverride`**, DPI-aware stroke alignment via `SnapsToDevicePixels`.
 - Resolution of §8's `PatternMaker` path: either remove it, or redefine it as an explicitly separate feature (e.g. a pattern-authoring helper) with its own opt-in surface, so it can no longer be mistaken for — or accidentally wired up as — the control's primary rendering path.
 
