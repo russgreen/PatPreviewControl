@@ -14,7 +14,7 @@ This checklist is derived from specs/FillPatternPreview.implementation.plan.md a
   - [x] `src/FillPatternPreview/Parsing/PatternParseResult.cs`: `Success`, `Errors`, `Warnings`, `Dictionary<string, PatternDefinition>`.
 - [~] Implement `.pat` parser (spec section 7)
   - [x] `src/FillPatternPreview/Parsing/PatParser.cs`: headers, comments, `;%UNITS`, `;%TYPE`, invariant doubles. (`%UNITS` parsing and units-aware default scale were added this session - see spec section 9.)
-  - [ ] Require >=5 numeric tokens; clamp large dash values; skip/record malformed lines. (5-token minimum and malformed-line skipping are done; dash-value clamping is still not implemented - arbitrarily large dash values are accepted as-is.)
+  - [ ] Require >=5 numeric tokens; clamp large dash values; skip/record malformed lines. (5-token minimum and malformed-line skipping are done. Dash values are not clamped, but any value with |v| > 1e9, NaN or Infinity is rejected as an error and the line skipped.)
   - [x] Duplicate name handling; selection by `PatPatternName`. (Implemented, but as "last wins" - the spec originally called for "first wins"; flagged as a known deviation in spec section 7.)
   - [ ] File parse cache key inputs prepared (path, last write, content hash). (No caching at all - `ParseFile` re-reads and re-parses on every call.)
 - [x] Tests
@@ -22,7 +22,7 @@ This checklist is derived from specs/FillPatternPreview.implementation.plan.md a
 
 ## Milestone 2 - Control Skeleton & Acquisition
 - [~] Register dependency properties (spec section 6)
-  - [~] `src/FillPatternPreview/Controls/FillPatternPreview.cs`: all DPs + coercion (Scale>0, Zoom in [0.1,20]). (Implemented: `PatFilePath`, `PatRawText`, `PatPatternName`, `LineBrush`, `Scale`, `Zoom`, `PanOffset`, `UsePatternMaker`, `Pattern`. Not implemented: `PatternSource`, `RevitFillPattern`, `StrokeThicknessOverride`, `IsModelPatternOverride`, `RenderMode`, `TileSizeHint`, `ShowBounds`, `ErrorTemplate`, `IsInteractive`, `SnapsToDevicePixels`. No DP coercion anywhere - `Scale`/`Zoom` are only guarded at render time via `Math.Max`.)
+  - [~] `src/FillPatternPreview/Controls/FillPatternPreview.cs`: all DPs + coercion (Scale>0, Zoom in [0.1,20]). (Implemented: `PatFilePath`, `PatRawText`, `PatPatternName`, `LineBrush`, `Scale`, `Zoom`, `PanOffset`, `UsePatternMaker`, `Pattern`. Not implemented: `PatternSource`, `RevitFillPattern`, `StrokeThicknessOverride`, `IsModelPatternOverride`, `RenderMode`, `TileSizeHint`, `ShowBounds`, `ErrorTemplate`, `IsInteractive`, `SnapsToDevicePixels`. `Scale`/`Zoom` are coerced to `[0.0001, 1e6]` and `PanOffset` to finite +/-1e9, but `Zoom` is not narrowed to 0.1-20 on the property itself - only interactive zoom is.)
   - [ ] Read-only DPs: `Pattern`, `Diagnostics`. (`Pattern` done; `Diagnostics` not implemented.)
   - [ ] Events: `PatternChanged`, `ParseFailed`, `InteractionChanged`. (Only `PatternChanged` exists.)
 - [ ] Implement acquisition workflow
@@ -55,9 +55,10 @@ This checklist is derived from specs/FillPatternPreview.implementation.plan.md a
 - [ ] `src/FillPatternPreview/Adapters/RevitFillPatternAdapter.cs`: detect `Autodesk.Revit.DB.FillPattern`; extract `Name`, `IsModel`, segments via reflection; normalize to `LineGroup`; warnings on partial/missing members. (Not implemented. Note: `Adapters/PatternMakerAdapter.cs` exists but is unrelated - it's the experimental `UsePatternMaker` rendering path, not a Revit reflection adapter.)
 
 ## Milestone 7 - Interaction (spec section 15)
-- [ ] Mouse: wheel zoom around cursor; drag pan; double-click reset. (Not implemented.)
-- [ ] Keyboard: `+`/`-` zoom; arrows pan; `Ctrl+0` reset. (Not implemented.)
-- [ ] Raise `InteractionChanged` on state changes. (Event doesn't exist.)
+- [x] Mouse: wheel zoom around cursor; drag pan; double-click reset. (`IsInteractive` DP, default `false`. `OnMouseWheel`/`OnMouseLeftButtonDown`/`OnMouseMove` in `Controls/FillPatternPreview.cs`; zoom is 1.1x per wheel notch, clamped to 0.1-20 in the interaction path only - the `Zoom` DP itself is still not coerced. `PanOffset` is now actually applied in `OnRender` (a translate of `PanOffset * EffectiveScale`), in pattern-native units.)
+- [x] Keyboard: `+`/`-` zoom; arrows pan; `Ctrl+0` reset. (Needs keyboard focus; a click on the control focuses it. Arrows pan 10 device units and move the pattern in the arrow's direction, like a drag.)
+- [x] Raise `InteractionChanged` on state changes. (`EventHandler`, raised only when Zoom/PanOffset actually change through interaction, including reset; not raised for programmatic DP sets.)
+- [x] Tests: `tests/FillPatternPreview.Tests/InteractionMathTests.cs` covers the zoom-at-cursor anchor invariant, zoom clamping, and pan math, via the extracted `Rendering/InteractionMath.cs`. (The `Control` event handlers themselves aren't unit tested; sample app has an Interactive checkbox and status line for manual checking.)
 
 ## Milestone 8 - Diagnostics, Accessibility, Logging
 - [ ] Diagnostics aggregation/update (spec section 14)
@@ -68,10 +69,10 @@ This checklist is derived from specs/FillPatternPreview.implementation.plan.md a
   - [ ] `IFillPatternLogger` no-op default; call at parse/render/error points. (Not implemented; the only diagnostics today are `Debug.WriteLine` calls in the parser and control.)
 
 ## Milestone 9 - Performance & Reliability (spec sections 12, 16, 20)
-- [ ] Freeze Freezables: geometry, brushes, pens, drawings. (Not done - a new `Pen` is allocated on every `OnRender` call, nothing is frozen.)
+- [~] Freeze Freezables: geometry, brushes, pens, drawings. (The stroke `Pen` and a snapshot of its brush are now frozen each render - this was a real freeze: drawing thousands of dashes with an unfrozen pen took seconds and grew quadratically (2 families ~2.4 s, 4 ~9.5 s, 32 > 20 s; afterwards 32 in ~70 ms). Clip geometries/transforms are still per-render and unfrozen; no pen/geometry reuse across renders yet.)
 - [ ] Minimize allocations; reuse pens/matrices; conditional `GuidelineSet` when `SnapsToDevicePixels`. (Not done; `SnapsToDevicePixels` DP doesn't exist.)
-- [~] Enforce limits: `MaxTileDimension`, `MaxLinesPerGroup`. (No tile concept to bound (Milestone 3 isn't built), but equivalent immediate-mode guards exist and were hardened this session: a 4000-repeat cap per line family, and a new 20,000-segment cap plus sub-pixel-cycle solid-line shortcut per visible chord - the latter added specifically to fix a real hang on a drafting pattern with sub-pixel-scale dash values. No aggregate cross-family budget exists yet.)
-- [ ] Cancellation guards; design-mode safe try/catch. (No cancellation support. Try/catch exists around file-based parsing only, not a general `DesignerProperties.GetIsInDesignMode` guard.)
+- [~] Enforce limits: `MaxTileDimension`, `MaxLinesPerGroup`. (No tile concept to bound (Milestone 3 isn't built), but equivalent immediate-mode guards exist and were hardened this session: a 4000-repeat cap per line family, and a new 20,000-segment cap plus sub-pixel-cycle solid-line shortcut per visible chord - the latter added specifically to fix a real hang on a drafting pattern with sub-pixel-scale dash values. A per-render-pass aggregate budget (`Rendering/RenderBudget.cs`, 250,000 units: one per visible chord and per dash segment) now bounds total work; when spent, remaining lines are not drawn. Repeat-range math is overflow-safe (`RepeatRangeFromBounds`/`IsRepeatRangeUsable`); parser limits: 4 MiB input, 8192-char lines, 10,000 patterns, 512 line groups/pattern, 64 dash entries, |value| <= 1e9, NaN/Infinity rejected.)
+- [~] Cancellation guards; design-mode safe try/catch. (`OnRender` and `LoadPattern` now catch all exceptions, so a failure leaves the pattern undrawn/absent rather than crashing the host; `ParseFile` returns an error result for IO/permission failures; clip/transform pushes are popped via `using` scopes. `Scale`/`Zoom` (`[0.0001, 1e6]`, NaN -> 1) and `PanOffset` (finite, +/-1e9) are coerced at the DP level. Still missing: cancellation, and file reads are synchronous on the UI thread - a hung network path can still block it. No explicit `GetIsInDesignMode` guard.)
 
 ## Milestone 10 - Testing, Samples, Docs
 - [~] Unit/integration tests

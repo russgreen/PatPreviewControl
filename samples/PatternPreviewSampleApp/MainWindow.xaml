@@ -16,10 +16,16 @@
             <TextBox x:Name="PatTextBox" AcceptsReturn="True" Height="160" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0"/>
             <TextBlock Text="Pattern Name (optional):" Margin="0,8,0,0" />
             <TextBox x:Name="PatternNameBox" />
+            <CheckBox Content="Tile pattern" Margin="0,8,0,0" IsChecked="{Binding TilePattern, ElementName=Preview, Mode=TwoWay}" />
+            <CheckBox Content="Highlight first tile" Margin="0,8,0,0" IsChecked="{Binding HighlightFirstTile, ElementName=Preview, Mode=TwoWay}" />
+            <CheckBox Content="Interactive" Margin="0,8,0,0" IsChecked="{Binding IsInteractive, ElementName=Preview, Mode=TwoWay}" />
+            <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Foreground="Gray"
+                       Text="Wheel: zoom at cursor. Drag: pan. Double-click or Ctrl+0: reset. Click the preview, then +/- to zoom and arrows to pan." />
+            <TextBlock x:Name="ViewStatus" Margin="0,4,0,0" />
             <Button Content="Apply" Click="OnApply" Margin="0,8,0,0" />
         </StackPanel>
         <Border Grid.Column="1" Margin="8" BorderBrush="Gray" BorderThickness="1">
-            <controls:FillPatternPreview x:Name="Preview" PatRawText="" PatPatternName="" />
+            <controls:FillPatternPreview x:Name="Preview" PatRawText="" PatPatternName="" IsInteractive="True" InteractionChanged="OnInteractionChanged" />
         </Border>
     </Grid>
 </Window>
