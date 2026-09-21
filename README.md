@@ -18,6 +18,7 @@ src/FillPatternPreview/          # Main library
 ├── Model/                      # Data models and records
 ├── Parsing/                    # .pat file parsing logic
 ├── Rendering/                  # Pattern rendering and geometry
+├── Imaging/                    # Headless PNG thumbnail generation
 ├── Caching/                    # Performance caching systems
 ├── Diagnostics/                # Diagnostic and monitoring tools
 ├── Accessibility/              # Accessibility support
@@ -38,8 +39,7 @@ using FillPatternPreview.Controls;
 // Create the control
 var patternPreview = new FillPatternPreview();
 
-// Set pattern source
-patternPreview.PatternSource = PatternSource.PatFile;
+// Set pattern source (PatRawText, if set, takes priority over PatFilePath)
 patternPreview.PatFilePath = @"C:\Patterns\ANSI31.pat";
 patternPreview.PatPatternName = "ANSI31";
 
@@ -51,11 +51,41 @@ patternPreview.Zoom = 2.0;
 patternPreview.PatternChanged += (s, e) => {
     Console.WriteLine($"Pattern loaded: {patternPreview.Pattern?.Name}");
 };
-
-patternPreview.ParseFailed += (s, e) => {
-    Console.WriteLine($"Parse error: {e.Message}");
-};
 ```
+
+## Generating a thumbnail
+
+`PatternThumbnail` renders a pattern to a PNG **without a control, a window or a running
+application**, using the same drawing code as the control.
+
+```csharp
+using FillPatternPreview.Imaging;
+
+// From a .pat file (first pattern in the file unless a name is given)
+byte[] png = PatternThumbnail.RenderPngFromFile(@"C:\Patterns\acad.pat", "ANSI31");
+File.WriteAllBytes("ANSI31.png", png);
+
+// From .pat text, with options
+byte[] png2 = PatternThumbnail.RenderPng(patText, "BRICK", new PatternThumbnailOptions
+{
+    Width = 96,
+    Height = 96,
+    Dpi = 192,                          // 192x192 pixels, same logical size
+    Background = null,                  // transparent
+    LineBrush = Brushes.SteelBlue,
+    FirstTileBrush = Brushes.Red,       // highlight the first repeat cell
+    TilesAcross = 4,                    // about four repeats across the image
+});
+
+// From an already-parsed PatternDefinition, straight to a file or stream
+PatternThumbnail.SavePng(pattern, "thumb.png");
+```
+
+By default the scale is chosen so about three repeats of the pattern span the image, so patterns
+with very different tile sizes all give a legible thumbnail; set `Scale` to use a fixed scale as the
+control does. It can be called from any thread (non-STA callers are marshalled onto a short-lived
+STA thread). Unreadable patterns and out-of-range options throw; extreme patterns are drawn
+partially rather than hanging.
 
 ## Building
 
