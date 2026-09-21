@@ -7,6 +7,25 @@
     <AssemblyName>FillPatternPreview</AssemblyName>
     <RootNamespace>FillPatternPreview</RootNamespace>
   </PropertyGroup>
+  <PropertyGroup>
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <PackageId>FillPatternPreview</PackageId>
+    <Authors>Russ Green</Authors>
+    <Description>A WPF control for previewing AutoCAD/Revit style hatch (fill) patterns from .pat files, raw .pat text and Revit FillPattern objects, with tiling, zoom and pan.</Description>
+    <PackageTags>wpf;hatch;fill-pattern;pat;revit;autocad;cad</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/russgreen/PatPreviewControl</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/russgreen/PatPreviewControl</PackageProjectUrl>
+    <IsPackable>true</IsPackable>
+    <DebugType>portable</DebugType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Link="README.md" />
+  </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="FillPatternPreview.Tests" />
   </ItemGroup>
