@@ -23,6 +23,9 @@
                        Text="Wheel: zoom at cursor. Drag: pan. Double-click or Ctrl+0: reset. Click the preview, then +/- to zoom and arrows to pan." />
             <TextBlock x:Name="ViewStatus" Margin="0,4,0,0" />
             <Button Content="Apply" Click="OnApply" Margin="0,8,0,0" />
+            <Button Content="Save thumbnail..." Click="OnSaveThumbnail" Margin="0,8,0,0" />
+            <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Foreground="Gray"
+                       Text="Saves a 128x128 PNG of the pattern text above, generated without the preview control." />
         </StackPanel>
         <Border Grid.Column="1" Margin="8" BorderBrush="Gray" BorderThickness="1">
             <controls:FillPatternPreview x:Name="Preview" PatRawText="" PatPatternName="" IsInteractive="True" InteractionChanged="OnInteractionChanged" />

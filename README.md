@@ -48,6 +48,23 @@ preview.PatternChanged += (s, e) =>
 preview.InteractionChanged += (s, e) =>
     Console.WriteLine($"Zoom {preview.Zoom:0.00}x, pan {preview.PanOffset}");
 ```
+src/FillPatternPreview/          # Main library
+├── Controls/                    # WPF control implementation
+├── Model/                      # Data models and records
+├── Parsing/                    # .pat file parsing logic
+├── Rendering/                  # Pattern rendering and geometry
+├── Imaging/                    # Headless PNG thumbnail generation
+├── Caching/                    # Performance caching systems
+├── Diagnostics/                # Diagnostic and monitoring tools
+├── Accessibility/              # Accessibility support
+└── Adapters/                   # External system adapters (Revit, etc.)
+
+tests/FillPatternPreview.Tests/  # Unit and integration tests
+specs/                          # Detailed specifications
+memory/                         # Project constitution and guidelines
+templates/                      # Development templates
+scripts/                        # Automation and helper scripts
+```
 
 `PatRawText` takes priority over `PatFilePath` when both are set. If the source can't be loaded or parsed, `Pattern` is `null` and nothing is drawn.
 
@@ -106,40 +123,53 @@ using FillPatternPreview.Parsing;
 
 PatternParseResult result = PatParser.ParseFile(@"C:\Patterns\acad.pat");   // or ParseText(string)
 
-foreach (var error in result.Errors)   Console.WriteLine($"Error: {error}");
-foreach (var warning in result.Warnings) Console.WriteLine($"Warning: {warning}");
+// Set pattern source (PatRawText, if set, takes priority over PatFilePath)
+patternPreview.PatFilePath = @"C:\Patterns\ANSI31.pat";
+patternPreview.PatPatternName = "ANSI31";
 
 foreach (var (name, pattern) in result.Patterns)
     Console.WriteLine($"{name}: {pattern.LineGroups.Count} line groups, model={pattern.IsModel}, units={pattern.Units}");
 ```
 
-Supported syntax: multiple patterns per file, `*NAME, description` headers with an optional `;%TYPE=MODEL|DRAFTING`, `%UNITS=` declarations, `;` comments, and definition lines of the form `angle, x-origin, y-origin, delta-x, delta-y [, dash, ...]`.
-
-## Safety limits
-
-Parsing and rendering run on the UI thread, so both are bounded so that hostile or corrupt input can't hang the app:
-
-- Parser: 4 MB of input, 8192 characters per line, 10,000 patterns, 512 line groups per pattern and 64 dash entries per line; values beyond ±1e9, NaN or infinity are rejected.
-- Renderer: dash cycles smaller than 1 DIP are drawn solid; at most 20,000 dash segments per line and 4,000 repeats per line family; and an overall budget of 250,000 drawing primitives per render, after which the pattern is drawn incompletely.
-
-## Project structure
-
+// Handle events
+patternPreview.PatternChanged += (s, e) => {
+    Console.WriteLine($"Pattern loaded: {patternPreview.Pattern?.Name}");
+};
 ```
-src/FillPatternPreview/          # The control library (net8.0-windows, WPF)
-├── Controls/                    # FillPatternPreview control
-├── Model/                       # PatternDefinition, LineGroup
-├── Parsing/                     # .pat parser and parse result
-├── Rendering/                   # Line expansion, tile calculation, interaction math, render budget
-├── PatternMaker/                # Geometry types used by the experimental rendering path
-├── Adapters/                    # PatternMakerAdapter
-└── Themes/                      # Default control template
 
-samples/PatternPreviewSampleApp/ # Demo app (paste .pat text, toggle tiling / highlight / interaction)
-tests/FillPatternPreview.Tests/  # xUnit tests
-build/                           # Fallout build project (compile, sign, pack)
-specs/                           # Specification, implementation plan and task tracking
-memory/                          # Project constitution and guidelines
+## Generating a thumbnail
+
+`PatternThumbnail` renders a pattern to a PNG **without a control, a window or a running
+application**, using the same drawing code as the control.
+
+```csharp
+using FillPatternPreview.Imaging;
+
+// From a .pat file (first pattern in the file unless a name is given)
+byte[] png = PatternThumbnail.RenderPngFromFile(@"C:\Patterns\acad.pat", "ANSI31");
+File.WriteAllBytes("ANSI31.png", png);
+
+// From .pat text, with options
+byte[] png2 = PatternThumbnail.RenderPng(patText, "BRICK", new PatternThumbnailOptions
+{
+    Width = 96,
+    Height = 96,
+    Dpi = 192,                          // 192x192 pixels, same logical size
+    Background = null,                  // transparent
+    LineBrush = Brushes.SteelBlue,
+    FirstTileBrush = Brushes.Red,       // highlight the first repeat cell
+    TilesAcross = 4,                    // about four repeats across the image
+});
+
+// From an already-parsed PatternDefinition, straight to a file or stream
+PatternThumbnail.SavePng(pattern, "thumb.png");
 ```
+
+By default the scale is chosen so about three repeats of the pattern span the image, so patterns
+with very different tile sizes all give a legible thumbnail; set `Scale` to use a fixed scale as the
+control does. It can be called from any thread (non-STA callers are marshalled onto a short-lived
+STA thread). Unreadable patterns and out-of-range options throw; extreme patterns are drawn
+partially rather than hanging.
 
 ## Building
 

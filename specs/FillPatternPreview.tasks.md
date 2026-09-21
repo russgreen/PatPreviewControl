@@ -86,6 +86,12 @@ This checklist is derived from specs/FillPatternPreview.implementation.plan.md a
   - [ ] Public XML docs; README usage and DP table. (Not done - no XML doc comments on the public DPs/API, no README.)
   - [ ] Ensure CI runs `dotnet test && dotnet build`. (No CI configuration exists in the repo; there's also no `dotnet test` target since there are no tests.)
 
+## Milestone 11 - Thumbnail export (spec section 8a)
+- [x] Extract the control's drawing into `Rendering/PatternRenderer.cs` and pattern selection into `Rendering/PatternResolver.cs`, shared by the control and the exporter. (Behaviour-neutral refactor; the existing suite passed unchanged.)
+- [x] `Imaging/PatternThumbnail.cs` + `PatternThumbnailOptions.cs`: headless PNG/`BitmapSource` generation from a `PatternDefinition`, .pat text or .pat file; fit-N-tiles default scale; STA marshalling.
+- [x] Tests: `tests/FillPatternPreview.Tests/ThumbnailTests.cs`, including a pixel comparison against the control.
+- [x] Sample app "Save thumbnail..." button; README section.
+
 ## Definition of Done (summary)
 - [ ] Parser robust per spec; diagnostics populated; warm cache works. (Parser is reasonably robust for malformed lines and now has test coverage, but diagnostics aren't populated and there's no cache.)
 - [ ] Rendering Auto mode correct; meets perf targets for 200x200 px preview. (No Auto mode exists; immediate-mode rendering is now correctness-verified for solid/dashed lines at multiple angles and a hang-prone drafting pattern, both by manual visual testing and by an automated regression suite, but no formal perf benchmarking has been done.)
